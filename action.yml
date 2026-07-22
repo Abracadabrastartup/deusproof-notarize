@@ -1,0 +1,102 @@
+name: 'DEUSPROOF Notarize'
+description: 'On release, timestamp a creative file and anchor it to Bitcoin — a permanent, verifiable proof it existed first. Free, no account.'
+author: 'DEUSPROOF'
+branding:
+  icon: 'award'
+  color: 'blue'
+
+inputs:
+  file:
+    description: 'Path to the creative file to notarize. Its CONTENT is recorded on a PUBLIC, permanent, append-only ledger — only point this at content you intend to make public.'
+    required: true
+  handle:
+    description: 'Author/agent handle to credit on the certificate.'
+    required: false
+    default: ${{ github.repository_owner }}
+  model:
+    description: 'Optional: the AI model that produced the work (e.g. "gpt-4", "claude").'
+    required: false
+    default: ''
+  api-base:
+    description: 'DEUSPROOF API base URL (override only for testing).'
+    required: false
+    default: 'https://deusproof.com'
+  fail-on-error:
+    description: 'If "false" (default), a notarization error warns but never fails your build.'
+    required: false
+    default: 'false'
+
+outputs:
+  verify-url:
+    description: 'Permanent public URL of the certificate.'
+    value: ${{ steps.notarize.outputs.verify_url }}
+  certificate-id:
+    description: 'The certificate id.'
+    value: ${{ steps.notarize.outputs.cert_id }}
+
+runs:
+  using: 'composite'
+  steps:
+    - id: notarize
+      shell: bash
+      env:
+        DP_FILE: ${{ inputs.file }}
+        DP_HANDLE: ${{ inputs.handle }}
+        DP_MODEL: ${{ inputs.model }}
+        DP_API: ${{ inputs.api-base }}
+        DP_FAIL: ${{ inputs.fail-on-error }}
+        DP_REPO: ${{ github.repository }}
+        DP_REF: ${{ github.ref_name }}
+      run: |
+        set -uo pipefail
+        soft_fail() {
+          echo "::warning title=DEUSPROOF::$1"
+          if [ "${DP_FAIL}" = "true" ]; then exit 1; fi
+          exit 0
+        }
+
+        if [ ! -f "${DP_FILE}" ]; then
+          soft_fail "File not found: ${DP_FILE} — nothing was notarized."
+        fi
+
+        # The ledger stores text; cap what we send (the hash covers the full file
+        # regardless, but the readable record is bounded).
+        OUTPUT="$(head -c 100000 "${DP_FILE}")"
+        PROMPT="Release ${DP_REF} of ${DP_REPO} — creative artifact ${DP_FILE}"
+
+        # Build the JSON with jq so any characters in the file are safely escaped.
+        PAYLOAD="$(jq -n \
+          --arg platform "github" \
+          --arg handle   "${DP_HANDLE}" \
+          --arg model    "${DP_MODEL}" \
+          --arg source   "https://github.com/${DP_REPO}" \
+          --arg prompt   "${PROMPT}" \
+          --arg output   "${OUTPUT}" \
+          '{platform:$platform, agent_handle:$handle, model:$model, source_url:$source, prompt_text:$prompt, output_text:$output}')" \
+          || soft_fail "Could not build the request payload."
+
+        RESP="$(curl -sS -m 30 -X POST "${DP_API}/api/certifications" \
+          -H 'Content-Type: application/json' -d "${PAYLOAD}")" \
+          || soft_fail "Could not reach DEUSPROOF (network/timeout). Your build is unaffected."
+
+        VERIFY_URL="$(printf '%s' "${RESP}" | jq -r '.verify_url // empty')"
+        CERT_ID="$(printf '%s' "${RESP}" | jq -r '.id // empty')"
+        SCORE="$(printf '%s' "${RESP}" | jq -r '.aas_score_100 // empty')"
+
+        if [ -z "${VERIFY_URL}" ]; then
+          soft_fail "DEUSPROOF did not return a certificate (response: $(printf '%s' "${RESP}" | head -c 200))."
+        fi
+
+        echo "verify_url=${VERIFY_URL}" >> "${GITHUB_OUTPUT}"
+        echo "cert_id=${CERT_ID}" >> "${GITHUB_OUTPUT}"
+
+        {
+          echo "### 🏛 Notarized on DEUSPROOF"
+          echo ""
+          echo "**${DP_FILE}** was recorded on a public, append-only ledger — AAS ${SCORE}/100."
+          echo "Its RFC 3161 timestamp and Bitcoin anchor settle over the next minutes/hours; the proof is permanent and independently verifiable."
+          echo ""
+          echo "🔗 **Certificate:** ${VERIFY_URL}"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        echo "✔ Notarized: ${VERIFY_URL}"
