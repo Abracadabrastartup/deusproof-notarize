@@ -1,5 +1,5 @@
 name: 'DEUSPROOF Notarize'
-description: 'On release, timestamp a creative file and anchor it to Bitcoin — a permanent, verifiable proof it existed first. Free, no account.'
+description: 'Timestamp a creative file and anchor it to Bitcoin on release — verifiable proof it existed first. Free.'
 author: 'DEUSPROOF'
 branding:
   icon: 'award'
