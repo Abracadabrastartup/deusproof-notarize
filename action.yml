@@ -7,7 +7,7 @@ branding:
 
 inputs:
   file:
-    description: 'Path to the creative file to notarize. Its CONTENT is recorded on a PUBLIC, permanent, append-only ledger — only point this at content you intend to make public.'
+    description: On release, timestamp a creative file and anchor it to Bitcoin
     required: true
   handle:
     description: 'Author/agent handle to credit on the certificate.'
