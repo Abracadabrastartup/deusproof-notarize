@@ -1,14 +1,19 @@
 name: 'DEUSPROOF Notarize'
-description: 'Timestamp a creative file and anchor it to Bitcoin on release — verifiable proof it existed first. Free.'
+description: 'Timestamp and Bitcoin-anchor your work from CI. Content or hash mode (private): sends only a SHA-256. Free.'
 author: 'DEUSPROOF'
 branding:
   icon: 'award'
   color: 'blue'
 
 inputs:
+  mode:
+    description: '"content" (default) records the file text on the PUBLIC ledger and scores it. "hash" sends ONLY the SHA-256 — nothing is uploaded — a proof of existence for private repos.'
+    required: false
+    default: 'content'
   file:
-    description: On release, timestamp a creative file and anchor it to Bitcoin
-    required: true
+    description: 'Path to the file to notarize. In "content" mode its text is recorded on a PUBLIC ledger (point it only at content you intend to make public). In "hash" mode only its SHA-256 is sent; if omitted in hash mode, the commit itself is notarized.'
+    required: false
+    default: ''
   handle:
     description: 'Author/agent handle to credit on the certificate.'
     required: false
@@ -33,6 +38,9 @@ outputs:
   certificate-id:
     description: 'The certificate id.'
     value: ${{ steps.notarize.outputs.cert_id }}
+  output-hash:
+    description: 'The SHA-256 that was notarized (hash mode) — republish it to verify.'
+    value: ${{ steps.notarize.outputs.output_hash }}
 
 runs:
   using: 'composite'
@@ -40,6 +48,7 @@ runs:
     - id: notarize
       shell: bash
       env:
+        DP_MODE: ${{ inputs.mode }}
         DP_FILE: ${{ inputs.file }}
         DP_HANDLE: ${{ inputs.handle }}
         DP_MODEL: ${{ inputs.model }}
@@ -47,6 +56,7 @@ runs:
         DP_FAIL: ${{ inputs.fail-on-error }}
         DP_REPO: ${{ github.repository }}
         DP_REF: ${{ github.ref_name }}
+        DP_SHA: ${{ github.sha }}
       run: |
         set -uo pipefail
         soft_fail() {
@@ -55,6 +65,64 @@ runs:
           exit 0
         }
 
+        # ---------------------------------------------------------------- hash mode
+        # Proof of existence: send ONLY a SHA-256 — never the content. Ideal for
+        # private repos. Hash the given file, or (no file) the commit fingerprint,
+        # using the same recipe as the git hook so both verify identically.
+        if [ "${DP_MODE}" = "hash" ]; then
+          if [ -n "${DP_FILE}" ]; then
+            if [ ! -f "${DP_FILE}" ]; then
+              soft_fail "File not found: ${DP_FILE} — nothing was notarized."
+            fi
+            HASH="$(sha256sum "${DP_FILE}" | cut -d' ' -f1)"
+            SUBJECT="file ${DP_FILE}"
+          else
+            HASH="$(printf 'deusproof-commit:%s' "${DP_SHA}" | sha256sum | cut -d' ' -f1)"
+            SUBJECT="commit ${DP_SHA}"
+          fi
+
+          PAYLOAD="$(jq -n \
+            --arg output "${HASH}" \
+            --arg handle "${DP_HANDLE}" \
+            --arg model  "${DP_MODEL}" \
+            --arg source "https://github.com/${DP_REPO}" \
+            '{output_hash:$output, platform:"github", agent_handle:$handle, model:$model, source_url:$source}')" \
+            || soft_fail "Could not build the request payload."
+
+          RESP="$(curl -sS -m 30 -X POST "${DP_API}/api/certifications/hash" \
+            -H 'Content-Type: application/json' -d "${PAYLOAD}")" \
+            || soft_fail "Could not reach DEUSPROOF (network/timeout). Your build is unaffected."
+
+          VERIFY_URL="$(printf '%s' "${RESP}" | jq -r '.verify_url // empty')"
+          CERT_ID="$(printf '%s' "${RESP}" | jq -r '.id // empty')"
+          if [ -z "${VERIFY_URL}" ]; then
+            soft_fail "DEUSPROOF did not return a certificate (response: $(printf '%s' "${RESP}" | head -c 200))."
+          fi
+
+          echo "verify_url=${VERIFY_URL}" >> "${GITHUB_OUTPUT}"
+          echo "cert_id=${CERT_ID}" >> "${GITHUB_OUTPUT}"
+          echo "output_hash=${HASH}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### 🏛 Notarized on DEUSPROOF — proof of existence"
+            echo ""
+            echo "The SHA-256 of **${SUBJECT}** was sealed on a public, append-only ledger — **nothing was uploaded**, only the fingerprint."
+            echo "Its RFC 3161 timestamp and Bitcoin anchor settle over the next minutes/hours; the proof is permanent and independently verifiable."
+            echo ""
+            echo "\`\`\`"
+            echo "SHA-256  ${HASH}"
+            echo "\`\`\`"
+            echo "🔗 **Certificate:** ${VERIFY_URL}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          echo "✔ Notarized (hash): ${VERIFY_URL}"
+          exit 0
+        fi
+
+        # ------------------------------------------------------------- content mode
+        if [ -z "${DP_FILE}" ]; then
+          soft_fail 'content mode requires a "file" input (or set mode: hash to notarize the commit).'
+        fi
         if [ ! -f "${DP_FILE}" ]; then
           soft_fail "File not found: ${DP_FILE} — nothing was notarized."
         fi
